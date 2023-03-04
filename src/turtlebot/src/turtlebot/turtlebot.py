@@ -1,3 +1,6 @@
+# !/usr/bin/python3
+
+
 import rospy
 from geometry_msgs.msg import PoseStamped
 import math
@@ -8,7 +11,7 @@ from scipy import interpolate
 import casadi
 
 
-from tf.transformations import euler_from_quaternion
+# from tf.transformations import euler_from_quaternion
 
 class TurtleBotException(Exception):
     pass
@@ -41,10 +44,10 @@ class TurtleBot:
 
     def state_callback(self, msg):
         next_pose = PoseStamped()
-        next_pose.position.x = msg.pose.position.x
-        next_pose.position.y = msg.pose.position.z
+        next_pose.pose.position.x = msg.pose.position.x
+        next_pose.pose.position.y = msg.pose.position.z
 
-        v = hypot(self.pose.position.x-next_pose.position.x, self.pose.position.y-next_pose.position.y)/0.02
+        v = hypot(self.pose.pose.position.x-next_pose.pose.position.x, self.pose.pose.position.y-next_pose.pose.position.y)/0.02
 
         w = msg.pose.orientation.w
         x = msg.pose.orientation.x
@@ -61,11 +64,11 @@ class TurtleBot:
         # angleY = y*180/math.pi
 
         theta = angleP
-        omega = (theta-self.pose.orientation.y)/0.02
+        omega = (theta-self.pose.pose.orientation.y)/0.02
 
-        next_pose.orientation.x = v
-        next_pose.orientation.y = theta
-        next_pose.orientation.z = omega
+        next_pose.pose.orientation.x = v
+        next_pose.pose.orientation.y = theta
+        next_pose.pose.orientation.z = omega
 
         self.pose = next_pose
 
