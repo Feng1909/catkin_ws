@@ -1,0 +1,7 @@
+set(turtlebot_SETUP_PY_SETUP_MODULE "distutils.core")
+set(turtlebot_SETUP_PY_VERSION "0.0.0")
+set(turtlebot_SETUP_PY_SCRIPTS "bin/turtlebot_node")
+set(turtlebot_SETUP_PY_PACKAGES "turtlebot")
+set(turtlebot_SETUP_PY_PACKAGE_DIRS "src/turtlebot")
+set(turtlebot_SETUP_PY_MODULES "")
+set(turtlebot_SETUP_PY_MODULE_DIRS "")

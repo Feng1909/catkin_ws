@@ -1,0 +1,15 @@
+#!/usr/bin/python3
+
+import rospy
+from turtlebot.turtlebot import TurtleBot, TurtleBotException
+
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('rospy_turtlebot', log_level=rospy.INFO)
+        turtlebot = TurtleBot()
+        rospy.spin()
+    except TurtleBotException as e:
+        rospy.logfatal('{}: Shutting down turtlebot node'.format(e))
+    except rospy.ROSInterruptException:
+        pass
