@@ -2,11 +2,11 @@
 
 
 import rospy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 import math
 import os
 import numpy as np
-from math import fabs, cos, sin, hypot, pi, atan2, acos
+from math import fabs, cos, sin, hypot, pi, atan2, acos, sqrt
 from scipy import interpolate
 import casadi as ca
 import yaml
@@ -32,6 +32,7 @@ class TurtleBot:
                          self.state_callback)
         
         self.pub = rospy.Publisher('/state', PoseStamped)
+        self.cmd_pub = rospy.Publisher('/cmd_vel', Twist)
         
         self.pose = PoseStamped()
         '''
@@ -44,6 +45,13 @@ class TurtleBot:
         self.path = []
 
         self.load_map()
+        self.state = {}
+        self.state['time_stamp'] = 0.0
+        self.state['x'] = 0
+        self.state['y'] = 0
+        self.state['v'] = 0
+        self.state['theta'] = 0
+        self.state['omega'] = 0
 
         with open('bot.yaml') as yamlfile:
             cfgs = yaml.load(yamlfile, Loader=yaml.FullLoader)
@@ -129,53 +137,155 @@ class TurtleBot:
         self.opti.set_initial(self.opt_states, next_states)
         sol = self.opti.solve()
 
+        rate = rospy.Rate(10)
+
+        while(not rospy.is_shutdown()):
+            self.pub.publish(self.pose)
+            self.run_cmd()
+            rate.sleep()
+        rospy.spin()
+
     def state_callback(self, msg):
         next_pose = PoseStamped()
         next_pose.pose.position.x = msg.pose.position.x
         next_pose.pose.position.y = msg.pose.position.z
 
-        v = hypot(self.pose.pose.position.x-next_pose.pose.position.x, self.pose.pose.position.y-next_pose.pose.position.y)/0.02
+        if self.timestamp == 0.0:
+            self.timestamp = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec
+        delta_time = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec - self.timestamp
+        self.timestamp = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec
 
         w = msg.pose.orientation.w
         x = msg.pose.orientation.x
         y = msg.pose.orientation.y
         z = msg.pose.orientation.z
-        # r = math.atan2(2*(w*x+y*z),1-2*(x*x+y*y))
-        # p = math.asin(2*(w*y-z*x))
-        # y = math.atan2(2*(w*z+x*y),1-2*(z*z+y*y))
-        # angleR = r
-        # angleP = p
-        # angleY = y
-        # # angleR = r*180/math.pi
-        # # angleP = p*180/math.pi
-        # # angleY = y*180/math.pi
 
-        # theta = angleP
-        # omega = (theta-self.pose.pose.orientation.y)/0.02
-
-        ## test:
         matrix_c = 1-2*y*y-2*z*z
         matrix_s = 2*x*z-2*w*y
         theta = atan2(-matrix_s, matrix_c)/3.141592653*180
 
+        delta_s = hypot(self.state['x'] - next_pose.pose.position.x, self.state['y'] - next_pose.pose.position.y)
+        delta_theta = theta - self.state['theta']
+        v = delta_s/delta_time
+        omega = delta_theta/delta_time
+
         next_pose.pose.orientation.x = v
         next_pose.pose.orientation.y = theta
-        # next_pose.pose.orientation.z = omega
+        next_pose.pose.orientation.z = omega
 
         self.pose = next_pose
 
-	
-        self.pub.publish(next_pose)
+        self.diff = 0
 
-    def find_path(self):
-        min_ = 9999
+    def get_path(self):
+        x = self.state['x']
+        y = self.state['y']
+        min_now = 9999
         index = -1
+        num = 0
+        a_1 = []
+        a_2 = []
+        b = [x, y]
         for i in self.path:
-            index += 1
-            if hypot(self.pose.position.x - i[0], self.pose.position.y - i[1]) < min_:
-                min_ = hypot(self.pose.position.x - i[0], self.pose.position.y - i[1])
-            else:
-                self.path = self.path[index:]
+            if hypot(x-i[0], y-i[1]) < min_now:
+                min_now = hypot(x-i[0], y-i[1])
+                index = num
+                a_2 = a_1
+                a_1 = [i[0], i[1]]
+            num += 1
+
+        # cal l#
+        if a_2 != []:
+            a1_b = [b[0]-a_1[0], b[1]-a_1[1]]
+            a1_a2 = [a_2[0]-a_1[0], a_2[1]-a_1[1]]
+            self.l = abs(hypot(a1_b[0], a1_b[1])) * sin(acos(abs(
+                (a1_a2[0]*a1_b[0]+a1_a2[1]*a1_b[1]) /
+                (hypot(a1_a2[0], a1_a2[1])*hypot(a1_b[0], a1_b[1]))
+            )))
+        else:
+            self.l = hypot(a_1[0]-b[0], a_1[1]-b[1])
+        self.diff += self.l
+        # print(self.l)
+
+        if index == -1:
+            cmd = Twist()
+            cmd.twist.linear.x = 0
+            cmd.twist.angular.y = 0
+            self.cmd_pub.publish(cmd)
+            raise Exception('find location error')
+        
+        if index+1+self.cfg.ref_ahead > len(self.path):
+            cmd = Twist()
+            cmd.twist.linear.x = 0
+            cmd.twist.angular.y = 0
+            self.cmd_pub.publish(cmd)
+            print('diff: ', self.diff)
+            raise Exception('mission finished')        
+        path_next = self.path[index+1: index+1+self.cfg.ref_ahead]      
+        path_return = []
+        for i in path_next:
+            x1 = i[0]-x
+            y1 = i[1]-y
+            D = hypot(x1, y1)
+            Phi = atan2(y1, x1)-self.state['theta']
+            theta = i[2] - self.state['theta']
+            while theta < -pi:
+                theta += 2*pi
+            while theta > pi:
+                theta -= 2*pi
+            path_return.append([D*cos(Phi),
+                                D*sin(Phi),
+                                theta,
+                                i[3],
+                                i[4]])
+        return path_return
+
+    def run_cmd(self):
+        # 路径在self.path中[x, y, theta, d_theta, dd_theta]
+        desire_v = self.cfg.MPC.desire_v
+        init_state = []
+        init_state.append([0, 0, 0, self.state['v'], self.state['omega']])
+        stot = 0
+        v_old = self.state.v
+        self.path_local = self.get_path()
+        for i in range(self.N):
+            path_ref = self.path_local[stot]
+
+            k = abs(path_ref[4])/pow(sqrt(1+pow(path_ref[3], 2)), 3)
+            r = 1/k
+            v = max(min(min(desire_v, v_old+self.cfg.model.max_a*self.dt), sqrt(self.cfg.model.max_a*r)), 0.1)
+            
+            state = []
+            for j in path_ref[:3]:
+                state.append(j)
+            state.append(v)
+            state.append(path_ref[3])
+            if i == 0:
+                state = [0, 0, 0, self.state['v'], self.state['omega']]
+            init_state.append([state[0],
+                               state[1],
+                               state[2],
+                               state[3],
+                               state[4]])
+            self.opti.set_value(self.ref_path[i, :], state)
+            stot += int(self.dt*v*100)
+            v_old = v
+        self.opti.set_initial(self.opt_controls, self.cmd_all)
+        init_state = np.array(init_state)
+        self.opti.set_initial(self.opt_states, init_state)
+        sol = self.opti.solve()
+        self.cmd_all = sol.value(self.opt_controls)
+        [self.cmd.u_l, self.cmd.u_r] = self.cmd_all[0]  
+        
+        v_l = self.state['v'] - self.cfgs.model.L * self.state['omega'] / 2 + self.cmd.u_l
+        v_r = self.state['v'] + self.cfgs.model.L * self.state['omega'] / 2 + self.cmd.u_r
+
+        cmd_omega = (v_r - v_l) / self.cfg.model.L
+        cmd = Twist()
+        cmd.twist.linear.x = 1
+        cmd.twist.angular.y = cmd_omega
+        self.cmd_pub.publish(cmd)
+
 
     def load_map(self):
         if not os.path.exists('spline.csv'):
