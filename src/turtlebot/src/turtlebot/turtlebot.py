@@ -282,7 +282,7 @@ class TurtleBot:
 
         cmd_omega = (v_r - v_l) / self.cfg.model.L
         cmd = Twist()
-        cmd.twist.linear.x = 1
+        cmd.twist.linear.x = (v_l+v_r)/2/0.28
         cmd.twist.angular.y = cmd_omega
         self.cmd_pub.publish(cmd)
 
