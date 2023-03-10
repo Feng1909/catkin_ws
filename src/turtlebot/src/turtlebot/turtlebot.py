@@ -43,6 +43,8 @@ class TurtleBot:
         '''
 
         self.path = []
+        
+        self.timestamp = 0.1
 
         self.load_map()
         self.state = {}
@@ -65,7 +67,9 @@ class TurtleBot:
         self.ref_path = []
         self.pre_path = []
         self.cmd = ControlCommand(0, 0)
-        self.state = State()
+        # self.state = State()
+        self.diff = 0
+        self.index = 0
 
         self.opti = ca.Opti()
         # ul, ur
@@ -146,14 +150,16 @@ class TurtleBot:
         rospy.spin()
 
     def state_callback(self, msg):
+        msg.pose.position.x = -msg.pose.position.x
+        # msg.pose.position.z = -msg.pose.position.z
         next_pose = PoseStamped()
         next_pose.pose.position.x = msg.pose.position.x
         next_pose.pose.position.y = msg.pose.position.z
 
         if self.timestamp == 0.0:
-            self.timestamp = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec
-        delta_time = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec - self.timestamp
-        self.timestamp = msg.header.stamp.sec + 1e-9*msg.header.stamp.nsec
+            self.timestamp = msg.header.stamp.secs + 1e-9*msg.header.stamp.nsecs
+        delta_time = msg.header.stamp.secs + 1e-9*msg.header.stamp.nsecs - self.timestamp
+        self.timestamp = msg.header.stamp.secs + 1e-9*msg.header.stamp.nsecs
 
         w = msg.pose.orientation.w
         x = msg.pose.orientation.x
@@ -162,7 +168,7 @@ class TurtleBot:
 
         matrix_c = 1-2*y*y-2*z*z
         matrix_s = 2*x*z-2*w*y
-        theta = atan2(-matrix_s, matrix_c)/3.141592653*180
+        theta = atan2(-matrix_s, matrix_c)
 
         delta_s = hypot(self.state['x'] - next_pose.pose.position.x, self.state['y'] - next_pose.pose.position.y)
         delta_theta = theta - self.state['theta']
@@ -173,9 +179,21 @@ class TurtleBot:
         next_pose.pose.orientation.y = theta
         next_pose.pose.orientation.z = omega
 
+        # while(theta[j] - theta[j+1] > np.pi):
+        #     theta[j+1] = theta[j+1] + 2*np.pi
+        while(theta > self.state['theta'] + np.pi):
+            theta -= 2*np.pi
+        while(theta < self.state['theta'] - np.pi):
+            theta += 2*np.pi
         self.pose = next_pose
 
-        self.diff = 0
+        self.state['x'] = msg.pose.position.x
+        self.state['y'] = msg.pose.position.z
+        self.state['theta'] = theta
+        self.state['v'] = 0.1
+        self.state['omega'] = 0
+        
+        # print(self.timestamp, msg.header.stamp.secs + 1e-9*msg.header.stamp.nsecs, delta_time)
 
     def get_path(self):
         x = self.state['x']
@@ -186,13 +204,20 @@ class TurtleBot:
         a_1 = []
         a_2 = []
         b = [x, y]
-        for i in self.path:
+        # for i in self.path:
+        for t in range(self.index, self.index+10):
+            i = self.path[t]
             if hypot(x-i[0], y-i[1]) < min_now:
                 min_now = hypot(x-i[0], y-i[1])
-                index = num
+                index = t
                 a_2 = a_1
                 a_1 = [i[0], i[1]]
             num += 1
+        if index != -1:
+            self.index = index
+            # if min_now < 0.05:
+            #     self.index += 1
+            print(index)
 
         # cal l#
         if a_2 != []:
@@ -216,8 +241,8 @@ class TurtleBot:
         
         if index+1+self.cfg.ref_ahead > len(self.path):
             cmd = Twist()
-            cmd.twist.linear.x = 0
-            cmd.twist.angular.y = 0
+            cmd.linear.x = 0
+            cmd.angular.y = 0
             self.cmd_pub.publish(cmd)
             print('diff: ', self.diff)
             raise Exception('mission finished')        
@@ -246,7 +271,7 @@ class TurtleBot:
         init_state = []
         init_state.append([0, 0, 0, self.state['v'], self.state['omega']])
         stot = 0
-        v_old = self.state.v
+        v_old = self.state['v']
         self.path_local = self.get_path()
         for i in range(self.N):
             path_ref = self.path_local[stot]
@@ -254,7 +279,8 @@ class TurtleBot:
             k = abs(path_ref[4])/pow(sqrt(1+pow(path_ref[3], 2)), 3)
             r = 1/k
             v = max(min(min(desire_v, v_old+self.cfg.model.max_a*self.dt), sqrt(self.cfg.model.max_a*r)), 0.1)
-            
+            v = 0.1
+
             state = []
             for j in path_ref[:3]:
                 state.append(j)
@@ -268,24 +294,29 @@ class TurtleBot:
                                state[3],
                                state[4]])
             self.opti.set_value(self.ref_path[i, :], state)
-            stot += int(self.dt*v*100)
+            stot += int(self.dt*v)
             v_old = v
         self.opti.set_initial(self.opt_controls, self.cmd_all)
         init_state = np.array(init_state)
         self.opti.set_initial(self.opt_states, init_state)
-        sol = self.opti.solve()
-        self.cmd_all = sol.value(self.opt_controls)
-        [self.cmd.u_l, self.cmd.u_r] = self.cmd_all[0]  
+        try:
+            sol = self.opti.solve()
+            self.cmd_all = sol.value(self.opt_controls)
+            [self.cmd.u_l, self.cmd.u_r] = self.cmd_all[0]  
         
-        v_l = self.state['v'] - self.cfgs.model.L * self.state['omega'] / 2 + self.cmd.u_l
-        v_r = self.state['v'] + self.cfgs.model.L * self.state['omega'] / 2 + self.cmd.u_r
+            v_l = self.state['v'] - self.cfg.model.L * self.state['omega'] / 2 + self.cmd.u_l
+            v_r = self.state['v'] + self.cfg.model.L * self.state['omega'] / 2 + self.cmd.u_r
 
-        cmd_omega = (v_r - v_l) / self.cfg.model.L
-        cmd = Twist()
-        cmd.twist.linear.x = (v_l+v_r)/2/0.28
-        cmd.twist.angular.y = cmd_omega
-        self.cmd_pub.publish(cmd)
-
+            cmd_omega = (v_r - v_l) / self.cfg.model.L
+            cmd = Twist()
+            cmd.linear.x = max((v_l+v_r)/2/0.28/5, 0.05)
+            cmd.linear.x = 0.1
+            cmd.angular.z = cmd_omega/10
+            self.cmd_pub.publish(cmd)
+            print(self.cmd.u_l, self.cmd.u_r)
+            print(v_l, v_r)
+        except:
+            print('die')
 
     def load_map(self):
         if not os.path.exists('spline.csv'):
